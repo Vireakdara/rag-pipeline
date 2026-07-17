@@ -1,0 +1,206 @@
+# Day 1 — Document Ingestion: Parsing
+### RAG Pipeline · Lesson 1 of 9
+
+---
+
+## Where this sits in the pipeline
+
+```
+YOU ARE HERE
+     ↓
+[ Parse ] → Chunk → Embed → Store → Retrieve → Rerank → Generate
+└──── ingestion (build once) ────┘   └──── query (every question) ────┘
+```
+
+Everything downstream depends on this box. If parsing hands garbage to the
+next step, every later step processes garbage — cleanly, silently, confidently.
+
+---
+
+## 1. Core idea
+
+**A PDF is not a document. It's a set of drawing instructions.**
+
+A `.docx` stores real text in reading order: *"Termination, for, convenience."*
+
+A PDF stores something else:
+> *draw glyph "T" at (72, 400) · draw "e" at (78, 400) · draw "r" at (84, 400) …*
+
+It's instructions for a **printer**. Consequences:
+- No guarantee characters are in reading order
+- No guarantee spaces exist as characters
+- No guarantee a "paragraph" is marked as anything
+
+So parsing isn't "read a file." It's **reverse-engineering readable text out of
+a format designed to be printed, not read by a machine.**
+
+---
+
+## 2. Three kinds of PDF
+
+| Type | What it is | Text layer? | How to get text |
+|---|---|---|---|
+| **Digital** | Word → Save as PDF | Yes | Extract directly (easy) |
+| **Scanned** | A photo of paper | No — just pixels | OCR required (hard) |
+| **Hybrid** | Digital + scanned mixed | Partial | Extract + OCR the gaps |
+
+**The trap:** test on a clean digital PDF, it works, ship it. Then a client
+uploads a *scanned* contract and the pipeline returns **empty text** — no error,
+just nothing. Every downstream step then "succeeds" on nothing.
+
+> **Rule #1 of ingestion: always measure what you extracted.**
+> A character count catches the silent-empty failure instantly.
+
+**Key principle:** *"It didn't crash" ≠ "it worked."* The scariest failures are
+silent — the pipeline runs green and produces garbage. Measuring the output is
+how you catch them.
+
+One clarification worth keeping precise: OCR doesn't "extract" text, it
+**recognizes** characters from an image — it *guesses* which letters the pixels
+represent, so it can be wrong. Direct extraction is exact; OCR is probabilistic.
+
+---
+
+## 3. Project structure
+
+```
+rag-pipeline/
+├── data/
+│   ├── raw/              # original PDFs — SACRED, never modified
+│   └── processed/        # extracted text, chunks
+├── src/
+│   └── ingest/
+│       └── parse.py      # Day 1
+├── notes/
+│   └── day01_parsing.md  # decision note
+└── README.md
+```
+
+Why `data/raw/` is never touched: when chunking breaks (it will), you re-run
+from the original source. Overwrite the raw files and you've destroyed
+reproducibility — same discipline as never editing training data in place.
+
+Setup used:
+```bash
+conda create -n rag python=3.10 -y
+conda activate rag
+pip install pymupdf          # install "pymupdf", import "fitz"
+```
+
+The `pymupdf` / `fitz` naming quirk: PyMuPDF is a thin Python skin over the C
+library **MuPDF**; `fitz` was the original codename. That's also *why it's fast*
+— the heavy lifting is compiled C.
+
+---
+
+## 4. Code
+
+### `make_test_pdf.py` — generate a known test file
+```python
+import fitz  # PyMuPDF
+
+doc = fitz.open()          # new empty PDF in memory
+page = doc.new_page()      # one blank A4 page
+
+text = (
+    "TERMINATION FOR CONVENIENCE\n"
+    "Either party may terminate this Agreement for convenience "
+    "upon thirty (30) days written notice.\n"
+    "Case No. 042/2021"
+)
+
+page.insert_text((72, 72), text, fontsize=11)  # (72,72) = 1 inch from top-left
+doc.save("data/raw/test_contract.pdf")
+doc.close()
+print("Created data/raw/test_contract.pdf")
+```
+
+### `src/ingest/parse.py` — the parser + the guard
+```python
+import fitz  # PyMuPDF
+
+
+def extract_text(pdf_path):
+    """Extract all text from a PDF file. Returns one string."""
+    doc = fitz.open(pdf_path)
+    full_text = ""
+    for page in doc:                   # one page at a time — page is the unit
+        full_text += page.get_text()
+    doc.close()
+    return full_text
+
+
+if __name__ == "__main__":
+    text = extract_text("data/raw/test_contract.pdf")
+    char_count = len(text)
+
+    print("--- EXTRACTED TEXT ---")
+    print(text)
+    print("--- MEASUREMENT ---")
+    print(f"Characters extracted: {char_count}")
+
+    # The guard: catch the silent-empty failure
+    if char_count < 10:
+        print("⚠️  WARNING: almost no text extracted.")
+        print("    This PDF is probably SCANNED — needs OCR, not direct extraction.")
+    else:
+        print("✓ Extraction looks healthy.")
+```
+
+### Why `for page in doc:` is a loop
+`get_text()` works on **one page at a time** — it can't grab the whole document
+at once. A 1-page test runs the loop once; a 90-page contract runs it 90 times.
+**The page is the unit of extraction.** The loop variable *is* the page — which
+is also where page numbers for citations ("per contract.pdf, page 7") will come
+from later. Right now `+=` throws that away; Day 2 + metadata bring it back.
+
+---
+
+## 5. The measurement (today's deliverable)
+
+- **Predicted:** ~150 characters (the text I inserted)
+- **Measured:** 142 characters ✓ — prediction and result match
+- **Threshold:** under 10 characters ⇒ probable scanned/failed file ⇒ route to OCR
+
+The discipline: **predict → measure → compare.** A number with nothing to
+compare it to tells you nothing. The prediction is what makes the measurement
+meaningful, and it's what would have caught a `0` instantly.
+
+---
+
+## 6. Decision note (the target shape)
+
+> **Problem:** PDFs come in three forms — digital (text layer, extract directly),
+> scanned (pixels, needs OCR), hybrid (both). Direct extraction silently returns
+> empty text on scanned files, with no error.
+>
+> **Decision:** Use PyMuPDF over pypdf and pdfplumber — fast C engine, handles
+> text + images + character positions, carries through to chunking and OCR later.
+> Add a character-count guard after every extraction.
+>
+> **Why:** "Ran without error" doesn't mean text came out — a scanned PDF runs
+> clean and returns nothing. The guard turns that silent failure into a visible
+> warning, so garbage never flows downstream unnoticed.
+>
+> **The number:** Extracted 142 characters, matching the ~150 prediction.
+> Threshold: under 10 characters flags a probable scanned/failed file for OCR.
+
+**The note-writing lesson:** every box needs the *because*, not just the label.
+"PyMuPDF" → "PyMuPDF **because**…". "Count the length" → "count the length **to
+catch this specific failure**." Label-without-reasoning is the interview trap;
+decision-with-reasoning is the target.
+
+---
+
+## What I own after Day 1
+- Why PDF parsing is non-trivial (drawing instructions, not text)
+- Three PDF types and which needs OCR
+- The silent-empty failure, and the guard that catches it
+- "It didn't crash" ≠ "it worked" — always measure the output
+- `predict → measure → compare` discipline
+- The page is the unit of extraction (→ future citations)
+- Decision-note shape: problem → decision (over alternatives) → why → the number
+
+## Pre-question for Day 2 (Chunking)
+> Why can't you just embed each whole 90-page document as a single chunk?
+> What goes wrong when one vector has to represent 90 pages?

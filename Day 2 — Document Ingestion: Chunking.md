@@ -166,8 +166,38 @@ so the note records what you did, not just the end-state idea.
 - Hybrid (structure → fixed fallback) = the production answer, and *why* it exists
 - Saw all three failure modes in real output, not just in theory
 
-## Pre-question for Day 3 (Embeddings)
-> Your 4 clean chunks are still just strings. To search by meaning, each must
-> become a vector. **Which model turns a chunk into a vector — and is it the same
-> kind of model as the LLM that writes the final answer?**
-> (You already answered this once, with CLIP. Day 3 makes it concrete.)
+## Bridge to Day 3 (Embeddings) — resolved
+
+**Question:** Your 4 clean chunks are still strings. To search by meaning, each
+must become a vector. Which model turns a chunk into a vector — and is it the
+same kind of model as the LLM that writes the final answer?
+
+**Answer:** The **embedding model** turns a chunk into a vector. It is **not** the
+same model — and not even the same *kind* of model — as the LLM that writes the
+final answer.
+
+> ⚠️ An embedding model is **not an LLM.** Both are transformers, but that's where
+> the similarity ends. Do not call the embedder an "LLM" — that's the exact
+> confusion to avoid.
+
+| | **Embedding model** | **LLM** |
+|---|---|---|
+| Job | chunk/query → **one vector** | prompt → **next word, repeatedly** |
+| Output | fixed list of numbers (e.g. 1024) | text |
+| Trained to | put similar meanings close (contrastive — CLIP) | predict the next token |
+| Size | small (~100–600M) | large (8B–500B) |
+| In the pipeline | the **Embed** box (Day 3) | the **Generate** box (Day 8) |
+| Runs | on every chunk + every query | once per question |
+
+**Why it matters (neWwave):** someone will suggest "just use GPT for embeddings
+too." It doesn't work — GPT outputs *text*, not a fixed vector you can run
+nearest-neighbor search on. Knowing which model does which job is the difference
+between a working pipeline and a fundamentally misconfigured one.
+
+**Precise sentence to keep:** *"The embedding model turns a chunk into a vector.
+It is not the same model, nor the same kind of model, as the LLM that writes the
+final answer — different architecture, different training objective, different
+output shape."*
+
+→ Day 3 makes this concrete: loading a real embedding model on the RTX 4050 and
+turning the 4 clean chunks into vectors.
